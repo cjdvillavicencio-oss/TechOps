@@ -1,7 +1,10 @@
 {
-    "name": "nextjs-mongo-template",
+    "name": "techops-ai-agents",
     "version": "0.1.0",
     "private": true,
+    "engines": {
+        "node": ">=20.0.0"
+    },
     "scripts": {
         "clean": "powershell -NoProfile -Command \"if (Test-Path .next) { Remove-Item -Recurse -Force .next }; if (Test-Path dev-server.log) { Remove-Item -Force dev-server.log }; if (Test-Path prod-server.log) { Remove-Item -Force prod-server.log }\"",
         "dev": "next dev --turbopack --hostname 0.0.0.0 --port 3000",
@@ -9,7 +12,8 @@
         "dev:webpack": "next dev --webpack --hostname 0.0.0.0 --port 3000",
         "build": "next build",
         "start": "node .next/standalone/server.js",
-        "preview:stable": "node .next/standalone/server.js"
+        "preview:stable": "node .next/standalone/server.js",
+        "start:docker": "node server.js"
     },
     "dependencies": {
         "@hookform/resolvers": "^5.1.1",

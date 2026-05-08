@@ -101,6 +101,7 @@ La imagen incluye:
 La guia especifica esta en:
 
 - `deploy/easypanel/README.md`
+- `deploy/easypanel/SERVICE_CHECKLIST.md`
 
 Resumen rapido:
 
