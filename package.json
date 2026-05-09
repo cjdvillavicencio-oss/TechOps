@@ -12,7 +12,7 @@
         "dev:webpack": "next dev --webpack --hostname 0.0.0.0 --port 3000",
         "build": "next build",
         "start": "node .next/standalone/server.js",
-        "preview:stable": "node .next/standalone/server.js",
+        "preview:stable": "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force .next/standalone/.next/static | Out-Null; if (Test-Path .next/static) { Copy-Item -Path .next/static/* -Destination .next/standalone/.next/static -Recurse -Force }; if (Test-Path public) { New-Item -ItemType Directory -Force .next/standalone/public | Out-Null; Copy-Item -Path public/* -Destination .next/standalone/public -Recurse -Force -ErrorAction SilentlyContinue }; node .next/standalone/server.js\"",
         "start:docker": "node server.js"
     },
     "dependencies": {

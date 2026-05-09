@@ -359,6 +359,19 @@ export default function Desktop() {
     setContextMenu(null);
   }, []);
 
+  const requestGoogleSheetsAccess = useCallback(() => {
+    setToast(t.agents.sheetsReconnect);
+    signIn(
+      'google',
+      { callbackUrl: window.location.href },
+      {
+        scope: `openid email profile https://www.googleapis.com/auth/spreadsheets`,
+        prompt: 'consent',
+        access_type: 'offline',
+      },
+    );
+  }, [t.agents.sheetsReconnect]);
+
   const openAccountWindow = useCallback(() => {
     setAccountWindow((current) => ({
       ...current,
@@ -931,19 +944,6 @@ export default function Desktop() {
       },
     }));
   }, []);
-
-  const requestGoogleSheetsAccess = useCallback(() => {
-    setToast(t.agents.sheetsReconnect);
-    signIn(
-      'google',
-      { callbackUrl: window.location.href },
-      {
-        scope: `openid email profile https://www.googleapis.com/auth/spreadsheets`,
-        prompt: 'consent',
-        access_type: 'offline',
-      },
-    );
-  }, [t.agents.sheetsReconnect]);
 
   const adjustDesktopScale = useCallback((delta) => {
     setDesktopScale((current) => {
