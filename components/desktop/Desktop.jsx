@@ -6,7 +6,10 @@ import {
   ArrowUp,
   CircleUserRound,
   Bot,
+  BookOpen,
   ChevronLeft,
+  Database,
+  Ellipsis,
   KeyRound,
   Mic,
   Paperclip,
@@ -16,6 +19,9 @@ import {
   Shuffle,
   TerminalSquare,
   Upload,
+  UsersRound,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import TechBackground from './TechBackground';
 import TopBar from './TopBar';
@@ -28,7 +34,6 @@ import { signIn, signOut, useSession } from 'next-auth/react';
 import {
   AGENTS_STORAGE_KEY,
   buildAssistantIntro,
-  buildAssistantReply,
   buildCreateAgentDraft,
   COLOR_OPTIONS,
   CONVERSATIONS_STORAGE_KEY,
@@ -54,6 +59,11 @@ const LANG_KEY = 'techops.lang';
 const TERMINAL_KEY = 'techops.agents.terminal.v1';
 const CHAT_KEY = 'techops.agents.chat-window.v1';
 const AGENTS_PANEL_KEY = 'techops.agents.panel.v1';
+const DESKTOP_SCALE_KEY = 'techops.desktop.scale.v1';
+
+const MIN_DESKTOP_SCALE = 0.72;
+const MAX_DESKTOP_SCALE = 1.2;
+const DEFAULT_DESKTOP_SCALE = 0.82;
 
 const INITIAL_TERMINAL = {
   open: false,
@@ -161,6 +171,12 @@ export default function Desktop() {
   const [contextMenu, setContextMenu] = useState(null);
   const [deleteConfirmAgentId, setDeleteConfirmAgentId] = useState(null);
   const [account, setAccount] = useState(() => createDefaultAccount());
+  const [desktopScale, setDesktopScale] = useState(DEFAULT_DESKTOP_SCALE);
+  const [sidebarPanel, setSidebarPanel] = useState(null);
+  const [rolesPanelTab, setRolesPanelTab] = useState('roles');
+  const [toast, setToast] = useState('');
+  const [sendingAgentId, setSendingAgentId] = useState(null);
+  const desktopViewportRef = useRef(null);
 
   const t = translations[lang];
   const agentsById = useMemo(() => {
@@ -221,6 +237,11 @@ export default function Desktop() {
 
       const savedPanel = localStorage.getItem(AGENTS_PANEL_KEY);
       if (savedPanel === 'hidden') setLauncherVisible(false);
+
+      const savedScale = Number.parseFloat(localStorage.getItem(DESKTOP_SCALE_KEY) || '');
+      if (Number.isFinite(savedScale)) {
+        setDesktopScale(Math.min(MAX_DESKTOP_SCALE, Math.max(MIN_DESKTOP_SCALE, savedScale)));
+      }
     } catch {}
 
     setHydrated(true);
@@ -233,10 +254,11 @@ export default function Desktop() {
       localStorage.setItem(TERMINAL_KEY, JSON.stringify(terminal));
       localStorage.setItem(CHAT_KEY, JSON.stringify(chatWindows));
       localStorage.setItem(AGENTS_PANEL_KEY, launcherVisible ? 'visible' : 'hidden');
+      localStorage.setItem(DESKTOP_SCALE_KEY, String(desktopScale));
       localStorage.setItem(AGENTS_STORAGE_KEY, JSON.stringify(agents));
       localStorage.setItem(CONVERSATIONS_STORAGE_KEY, JSON.stringify(conversationsByAgentId));
     } catch {}
-  }, [agents, chatWindows, conversationsByAgentId, hydrated, lang, launcherVisible, terminal]);
+  }, [agents, chatWindows, conversationsByAgentId, desktopScale, hydrated, lang, launcherVisible, terminal]);
 
   useEffect(() => {
     const onResize = () => setIsMobile(window.innerWidth < 900);
@@ -278,6 +300,12 @@ export default function Desktop() {
       setLauncherVisible(true);
     }
   }, [createAgentWindow.open, openAgentWindows.length, showCreateAgentMobile]);
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    const timeoutId = window.setTimeout(() => setToast(''), 4200);
+    return () => window.clearTimeout(timeoutId);
+  }, [toast]);
 
   const getNextWindowZ = useCallback(() => {
     let nextValue = 0;
@@ -377,7 +405,7 @@ export default function Desktop() {
         },
       }));
     });
-    setAgentEditor({ agentId: createdAgent.id, tab: 'profile', error: '' });
+    setToast(`${createdAgent.name} listo para conversar.`);
   }, [agents, closeInlineEditors, isMobile, t.agents.newAgentBaseName]);
 
   const closeCreateAgent = useCallback(() => {
@@ -387,15 +415,14 @@ export default function Desktop() {
     setCreateAgentMode('create');
     setEditingAgentId(null);
     setCreateAgentTab('profile');
-    setLauncherVisible(true);
   }, []);
 
-  const openEditAgent = useCallback((agent) => {
+  const openEditAgent = useCallback((agent, tab = 'profile') => {
     closeInlineEditors();
     setCreateAgentError('');
     setCreateAgentMode('edit');
     setEditingAgentId(agent.id);
-    setCreateAgentTab('profile');
+    setCreateAgentTab(tab);
     setCreateAgentDraft({
       name: agent.name,
       role: agent.role,
@@ -417,8 +444,13 @@ export default function Desktop() {
       setShowCreateAgentMobile(true);
       return;
     }
-    setAgentEditor({ agentId: agent.id, tab: 'profile', error: '' });
-  }, [closeInlineEditors, isMobile]);
+    setCreateAgentWindow((current) => ({
+      ...current,
+      open: true,
+      minimized: false,
+      zIndex: getNextWindowZ(),
+    }));
+  }, [closeInlineEditors, getNextWindowZ, isMobile]);
 
   const updateAgent = useCallback((agentId, patch) => {
     startTransition(() => {
@@ -480,34 +512,152 @@ export default function Desktop() {
     closeInlineEditors();
   }, [agents, closeInlineEditors, ensureConversation, getNextWindowZ]);
 
-  const appendExchange = useCallback((agent, text) => {
+  const appendAssistantSystemMessage = useCallback((agentId, content) => {
+    setConversationsByAgentId((current) => ({
+      ...current,
+      [agentId]: [
+        ...(current[agentId] ?? []),
+        {
+          id: `assistant-${agentId}-${Date.now()}`,
+          role: 'assistant',
+          content,
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    }));
+  }, []);
+
+  const appendExchange = useCallback(async (agent, text) => {
     const trimmed = text.trim();
     if (!trimmed) return;
 
-    setConversationsByAgentId((current) => {
-      const previous = current[agent.id]?.length ? current[agent.id] : [buildAssistantIntro(agent, lang)];
-      return {
+    if (!session?.user?.email) {
+      setToast(t.agents.noCredits);
+      return;
+    }
+
+    if (account.creditsUsd < account.responseCostUsd) {
+      setToast(t.agents.noCredits);
+      return;
+    }
+
+    const userMessage = createUserMessage(trimmed);
+    const previousConversation =
+      conversationsByAgentId[agent.id]?.length
+        ? conversationsByAgentId[agent.id]
+        : [buildAssistantIntro(agent, lang)];
+    const nextConversation = [...previousConversation, userMessage];
+
+    setConversationsByAgentId((current) => ({
+      ...current,
+      [agent.id]: nextConversation,
+    }));
+    setSendingAgentId(agent.id);
+
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          agent,
+          message: trimmed,
+          conversation: nextConversation,
+          conversationId: `conv_${agent.id}`,
+          creditsCharged: account.responseCostUsd,
+          availableCredits: account.creditsUsd,
+          sheetId: account.settings.sheets.sheetId,
+          sheetTab: account.settings.sheets.sheetTab,
+          userEmail: session.user.email,
+        }),
+      });
+
+      const payload = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        if (response.status === 402) {
+          setToast(payload.message || t.agents.noCredits);
+        } else if (response.status === 401) {
+          setToast(t.agents.noCredits);
+        } else {
+          setToast(payload.error || 'No se pudo enviar el mensaje al agente.');
+        }
+        appendAssistantSystemMessage(
+          agent.id,
+          payload.message || 'El chat no pudo completarse ahora mismo. Prueba de nuevo.',
+        );
+        return;
+      }
+
+      setConversationsByAgentId((current) => ({
         ...current,
         [agent.id]: [
-          ...previous,
-          createUserMessage(trimmed),
-          buildAssistantReply(agent, trimmed, lang),
+          ...(current[agent.id] ?? nextConversation),
+          {
+            id: `assistant-${agent.id}-${Date.now()}`,
+            role: 'assistant',
+            content: payload.reply,
+            createdAt: new Date().toISOString(),
+          },
         ],
-      };
-    });
+      }));
 
-    if (session?.user?.email && agent.provider === 'starxia-openai') {
-      setAccount((current) => {
-        const nextCharge = Math.min(0.01, current.creditsUsd);
-        return {
-          ...current,
-          creditsUsd: Math.max(0, Number((current.creditsUsd - nextCharge).toFixed(2))),
-          totalUsageUsd: Number((current.totalUsageUsd + nextCharge).toFixed(2)),
-          promptCount: current.promptCount + 1,
-        };
-      });
+      setAccount((current) => ({
+        ...current,
+        creditsUsd:
+          typeof payload.creditsUsd === 'number'
+            ? payload.creditsUsd
+            : Math.max(0, Number((current.creditsUsd - current.responseCostUsd).toFixed(4))),
+        totalUsageUsd:
+          typeof payload.totalUsageUsd === 'number'
+            ? payload.totalUsageUsd
+            : Number((current.totalUsageUsd + current.responseCostUsd).toFixed(4)),
+        promptCount:
+          typeof payload.promptCount === 'number' ? payload.promptCount : current.promptCount + 1,
+        settings: {
+          ...current.settings,
+          sheets: {
+            ...current.settings.sheets,
+            sheetId: payload.sheetId || current.settings.sheets.sheetId,
+            sheetTab: payload.sheetTab || current.settings.sheets.sheetTab,
+            connectionMethod: 'google-oauth',
+          },
+        },
+      }));
+
+      if (payload.needsGoogleSheetsAuth) {
+        requestGoogleSheetsAccess();
+      } else if (payload.sheetWarning) {
+        console.warn(payload.sheetWarning);
+        setToast(payload.sheetWarning || t.agents.sheetsFailed);
+      } else if (payload.sheetId) {
+        setToast(t.agents.sheetsSaved);
+      }
+    } catch (error) {
+      console.error('Chat send failed:', error);
+      setToast('No se pudo conectar con el chat del agente.');
+      appendAssistantSystemMessage(
+        agent.id,
+        'He recibido tu mensaje, pero no pude responder desde el servidor en este intento.',
+      );
+    } finally {
+      setSendingAgentId((current) => (current === agent.id ? null : current));
     }
-  }, [lang]);
+  }, [
+    account.creditsUsd,
+    account.responseCostUsd,
+    account.settings.sheets.sheetId,
+    account.settings.sheets.sheetTab,
+    appendAssistantSystemMessage,
+    conversationsByAgentId,
+    lang,
+    requestGoogleSheetsAccess,
+    session?.user?.email,
+    t.agents.noCredits,
+    t.agents.sheetsFailed,
+    t.agents.sheetsSaved,
+  ]);
 
   const handleHeroSubmit = useCallback((event) => {
     event.preventDefault();
@@ -518,7 +668,7 @@ export default function Desktop() {
     if (!atlas) return;
 
     openChatForAgent(atlas);
-    appendExchange(atlas, trimmed);
+    void appendExchange(atlas, trimmed);
     setHeroDraft('');
   }, [agents, agentsById, appendExchange, heroDraft, openChatForAgent]);
 
@@ -530,7 +680,7 @@ export default function Desktop() {
     const trimmed = (draftsByAgent[agentId] ?? '').trim();
     if (!trimmed) return;
 
-    appendExchange(agent, trimmed);
+    void appendExchange(agent, trimmed);
     setDraftsByAgent((current) => ({ ...current, [agentId]: '' }));
   }, [agentsById, appendExchange, draftsByAgent]);
 
@@ -594,6 +744,9 @@ export default function Desktop() {
       avatarType: createAgentDraft.avatarType,
       avatarValue,
       colorKey: createAgentDraft.colorKey,
+      provider: createAgentDraft.provider,
+      model: createAgentDraft.model,
+      systemPrompt: createAgentDraft.systemPrompt,
       behaviorFileName: createAgentDraft.behaviorFileName,
       behaviorFileContent: createAgentDraft.behaviorFileContent,
       knowledgeFileName: createAgentDraft.knowledgeFileName,
@@ -633,7 +786,6 @@ export default function Desktop() {
 
     setCreateAgentDraft(buildCreateAgentDraft());
     setCreateAgentError('');
-    setLauncherVisible(true);
     closeCreateAgent();
   }, [agents.length, closeCreateAgent, createAgentDraft, createAgentMode, editingAgentId, t.agents.create.errors.nameRequired, t.agents.create.errors.roleRequired]);
 
@@ -767,6 +919,39 @@ export default function Desktop() {
     }));
   }, []);
 
+  const updateAccountSheetSetting = useCallback((settingKey, value) => {
+    setAccount((current) => ({
+      ...current,
+      settings: {
+        ...current.settings,
+        sheets: {
+          ...current.settings.sheets,
+          [settingKey]: value,
+        },
+      },
+    }));
+  }, []);
+
+  const requestGoogleSheetsAccess = useCallback(() => {
+    setToast(t.agents.sheetsReconnect);
+    signIn(
+      'google',
+      { callbackUrl: window.location.href },
+      {
+        scope: `openid email profile https://www.googleapis.com/auth/spreadsheets`,
+        prompt: 'consent',
+        access_type: 'offline',
+      },
+    );
+  }, [t.agents.sheetsReconnect]);
+
+  const adjustDesktopScale = useCallback((delta) => {
+    setDesktopScale((current) => {
+      const next = Math.min(MAX_DESKTOP_SCALE, Math.max(MIN_DESKTOP_SCALE, current + delta));
+      return Number(next.toFixed(2));
+    });
+  }, []);
+
   const updateTerminal = useCallback((_, patch) => {
     setTerminal((current) => ({ ...current, ...patch }));
   }, []);
@@ -811,6 +996,29 @@ export default function Desktop() {
     }));
   }, [getNextWindowZ]);
 
+  const exportConversation = useCallback((agent) => {
+    const messages = conversationsByAgentId[agent.id] ?? [];
+    if (!messages.length) {
+      setToast('Todavia no hay mensajes para exportar.');
+      return;
+    }
+
+    const fileContent = messages
+      .map((message) => {
+        const sender = message.role === 'user' ? 'Usuario' : agent.name;
+        return `[${message.createdAt}] ${sender}\n${message.content}\n`;
+      })
+      .join('\n');
+
+    const blob = new Blob([fileContent], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${agent.name.toLowerCase()}-chat.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }, [conversationsByAgentId]);
+
   const dockItems = useMemo(
     () => [
       { id: 'agents', label: t.dock.agents, icon: Bot },
@@ -835,6 +1043,9 @@ export default function Desktop() {
     },
     [accountWindow.minimized, accountWindow.open, terminal.minimized, terminal.open],
   );
+  const hasDesktopWindowOpen =
+    createAgentWindow.open || accountWindow.open || terminal.open || openAgentWindows.length > 0;
+  const desktopZoomWidth = `${100 / desktopScale}%`;
 
   if (isMobile) {
     const firstOpenAgent = openAgentWindows[0] ?? null;
@@ -897,42 +1108,56 @@ export default function Desktop() {
       />
     );
   }
+  const [menuOpen, setMenuOpen] = useState(false);
 
   return (
-    <div className="relative min-h-screen w-full overflow-hidden text-white">
+    <div className="relative min-h-screen w-full overflow-x-hidden text-white">
       <TechBackground />
       <TopBar
         lang={lang}
         title={t.agents.modeTitle}
         authSlot={
-          session?.user ? (
-            <button
-              type="button"
-              onClick={openAccountWindow}
-              className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-3 py-1.5 text-[11px] text-white/78"
-            >
-              {session.user.image ? (
-                <img src={session.user.image} alt={session.user.name || 'Usuario'} className="h-5 w-5 rounded-full object-cover" />
-              ) : (
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-white/[0.08] text-[10px]">
-                  {session.user.name?.[0] || 'U'}
-                </span>
-              )}
-              <span>{account.settings.displayName || session.user.name || 'Cuenta'}</span>
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => signIn('google')}
-              className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-1.5 text-[11px] text-white/78"
-            >
-              Entrar con Google
-            </button>
-          )
+          <div className="flex items-center gap-2">
+            <div className="rounded-full border border-cyan-300/15 bg-cyan-400/[0.08] px-3 py-1.5 text-[11px] text-cyan-100/90">
+              {t.account.credits}: ${account.creditsUsd.toFixed(4)}
+            </div>
+            {session?.user ? (
+              <button
+                type="button"
+                onClick={openAccountWindow}
+                className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-3 py-1.5 text-[11px] text-white/78"
+              >
+                {session.user.image ? (
+                  <img src={session.user.image} alt={session.user.name || 'Usuario'} className="h-5 w-5 rounded-full object-cover" />
+                ) : (
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-white/[0.08] text-[10px]">
+                    {session.user.name?.[0] || 'U'}
+                  </span>
+                )}
+                <span>{account.settings.displayName || session.user.name || 'Cuenta'}</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => signIn('google')}
+                className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-1.5 text-[11px] text-white/78"
+              >
+                {t.account.signin}
+              </button>
+            )}
+          </div>
         }
       />
 
-      <div className="absolute inset-0 pb-24 pt-9">
+      <div
+        ref={desktopViewportRef}
+        className="absolute inset-0 overflow-y-auto overflow-x-hidden pb-24 pt-9"
+        onWheel={(event) => {
+          if (!event.ctrlKey) return;
+          event.preventDefault();
+          adjustDesktopScale(event.deltaY > 0 ? -0.04 : 0.04);
+        }}
+      >
         <AnimatePresence>
           {hydrated && showRibbon && launcherVisible ? (
             <motion.div
@@ -947,7 +1172,11 @@ export default function Desktop() {
           ) : null}
         </AnimatePresence>
 
-        <main className="relative z-10 h-full">
+        {hasDesktopWindowOpen ? (
+          <div className="pointer-events-none absolute inset-0 z-[5] backdrop-blur-[7px]" />
+        ) : null}
+
+        <main className="relative z-10 min-h-full">
           <AnimatePresence>
             {launcherVisible ? (
               <motion.section
@@ -956,89 +1185,171 @@ export default function Desktop() {
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -12 }}
                 transition={{ duration: 0.28 }}
-                className="mx-auto flex h-full max-w-[1060px] flex-col items-center justify-center px-8 pb-24"
+                className="mx-auto flex min-h-[calc(100vh-120px)] w-full max-w-[1240px] flex-col items-center justify-center px-8 pb-24 pr-[180px]"
               >
-                <div className="text-center">
-                  <p className="text-[14px] font-medium text-white/75">{t.agents.modeTitle}</p>
-                  <h1 className="mt-8 text-[50px] font-semibold leading-[1.05] tracking-[-0.03em] text-white">
-                    {t.agents.greeting}
-                  </h1>
-                  <p className="mt-2 text-[46px] font-semibold leading-[1.06] tracking-[-0.03em] text-white">
-                    {t.agents.question}
-                  </p>
-                </div>
-
-                <motion.div
-                  initial={{ opacity: 0, y: 18 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.08, duration: 0.35 }}
-                  className="mt-10 w-full max-w-[720px]"
+                <div
+                  className="mx-auto flex flex-col items-center"
+                  style={{
+                    transform: `scale(${desktopScale})`,
+                    transformOrigin: 'top center',
+                    width: desktopZoomWidth,
+                  }}
                 >
-                  <HeroComposer
-                    value={heroDraft}
-                    onChange={setHeroDraft}
-                    onSubmit={handleHeroSubmit}
-                    placeholder={t.agents.intentPlaceholder}
-                  />
-                </motion.div>
+                  <div className="text-center">
+                    <p className="text-[14px] font-medium text-white/75">{t.agents.modeTitle}</p>
+                    <h1 className="mt-8 text-[50px] font-semibold leading-[1.05] tracking-[-0.03em] text-white">
+                      {t.agents.greeting}
+                    </h1>
+                    <p className="mt-2 text-[46px] font-semibold leading-[1.06] tracking-[-0.03em] text-white">
+                      {t.agents.question}
+                    </p>
+                  </div>
 
-                <motion.div
-                  initial={{ opacity: 0, y: 18 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.16, duration: 0.35 }}
-                  className="mt-14 flex w-full flex-wrap items-start justify-center gap-x-10 gap-y-9"
-                >
-                  {agents.map((agent) => (
-                    <AgentAvatar
-                      key={agent.id}
-                      agent={agent}
-                      lang={lang}
-                      t={t}
-                      roleOptions={ROLE_OPTIONS}
-                      renameState={renameState}
-                      renameDraft={renameDraft}
-                      avatarEditor={avatarEditor}
-                      agentEditor={agentEditor}
-                      onClick={() => openChatForAgent(agent)}
-                      onOpenRename={openRename}
-                      onRenameDraftChange={setRenameDraft}
-                      onRenameSave={saveRename}
-                      onRenameCancel={() => setRenameState(null)}
-                      onOpenAvatarEditor={openAvatarEditor}
-                      onAvatarEditorChange={setAvatarEditor}
-                      onAvatarEditorFile={handleAvatarEditorFile}
-                      onAvatarEditorSave={saveAvatarEditor}
-                      onAvatarEditorCancel={() => setAvatarEditor(null)}
-                      onRoleChange={(value) => updateAgentEditorField(agent.id, 'roleType', value)}
-                      onOpenEditor={(tab) => openAgentEditor(agent.id, tab)}
-                      onEditorTabChange={(tab) =>
-                        setAgentEditor((current) =>
-                          current?.agentId === agent.id ? { ...current, tab } : current,
-                        )
-                      }
-                      onEditorFieldChange={(field, value) => updateAgentEditorField(agent.id, field, value)}
-                      onEditorFileChange={handleAgentKnowledgeFile}
-                      onEditorClose={() =>
-                        setAgentEditor((current) => (current?.agentId === agent.id ? null : current))
-                      }
-                      onOpenContextMenu={(event) =>
-                        setContextMenu({
-                          agentId: agent.id,
-                          x: event.clientX,
-                          y: event.clientY,
-                        })}
+                  <motion.div
+                    initial={{ opacity: 0, y: 18 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.08, duration: 0.35 }}
+                    className="mt-10 w-full max-w-[720px]"
+                  >
+                    <HeroComposer
+                      value={heroDraft}
+                      onChange={setHeroDraft}
+                      onSubmit={handleHeroSubmit}
+                      placeholder={t.agents.intentPlaceholder}
                     />
-                  ))}
-                  <CreateAgentAvatar lang={lang} onClick={openCreateAgent} />
-                </motion.div>
+                  </motion.div>
+
+                  <motion.div
+                    initial={{ opacity: 0, y: 18 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.16, duration: 0.35 }}
+                    className="mt-14 flex w-full flex-wrap items-start justify-center gap-x-10 gap-y-9"
+                  >
+                    {agents.map((agent) => (
+                      <AgentAvatar
+                        key={agent.id}
+                        agent={agent}
+                        lang={lang}
+                        t={t}
+                        roleOptions={ROLE_OPTIONS}
+                        renameState={renameState}
+                        renameDraft={renameDraft}
+                        avatarEditor={avatarEditor}
+                        agentEditor={agentEditor}
+                        onClick={() => openChatForAgent(agent)}
+                        onOpenRename={openRename}
+                        onRenameDraftChange={setRenameDraft}
+                        onRenameSave={saveRename}
+                        onRenameCancel={() => setRenameState(null)}
+                        onOpenAvatarEditor={openAvatarEditor}
+                        onAvatarEditorChange={setAvatarEditor}
+                        onAvatarEditorFile={handleAvatarEditorFile}
+                        onAvatarEditorSave={saveAvatarEditor}
+                        onAvatarEditorCancel={() => setAvatarEditor(null)}
+                        onRoleChange={(value) => updateAgentEditorField(agent.id, 'roleType', value)}
+                        onOpenEditor={(tab) => openAgentEditor(agent.id, tab)}
+                        onEditorTabChange={(tab) =>
+                          setAgentEditor((current) =>
+                            current?.agentId === agent.id ? { ...current, tab } : current,
+                          )
+                        }
+                        onEditorFieldChange={(field, value) => updateAgentEditorField(agent.id, field, value)}
+                        onEditorFileChange={handleAgentKnowledgeFile}
+                        onEditorClose={() =>
+                          setAgentEditor((current) => (current?.agentId === agent.id ? null : current))
+                        }
+                        onOpenContextMenu={(event) =>
+                          setContextMenu({
+                            agentId: agent.id,
+                            x: event.clientX,
+                            y: event.clientY,
+                          })}
+                      />
+                    ))}
+                  </motion.div>
+                </div>
               </motion.section>
             ) : null}
           </AnimatePresence>
 
+          <div className="pointer-events-none fixed right-5 top-20 z-20 flex flex-col items-end gap-3">
+            <div className="pointer-events-auto flex items-center gap-2 rounded-2xl border border-white/10 bg-slate-950/78 p-2 shadow-[0_18px_50px_-28px_rgba(0,0,0,0.82)] backdrop-blur-xl">
+              <button
+                type="button"
+                onClick={() => adjustDesktopScale(-0.04)}
+                className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-white/72 transition hover:bg-white/[0.08]"
+                aria-label={t.agents.zoom.out}
+                title={t.agents.zoom.out}
+              >
+                <ZoomOut className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setDesktopScale(DEFAULT_DESKTOP_SCALE)}
+                className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-[12px] text-white/70 transition hover:bg-white/[0.08]"
+                aria-label={t.agents.zoom.reset}
+                title={t.agents.zoom.reset}
+              >
+                {Math.round(desktopScale * 100)}%
+              </button>
+              <button
+                type="button"
+                onClick={() => adjustDesktopScale(0.04)}
+                className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-white/72 transition hover:bg-white/[0.08]"
+                aria-label={t.agents.zoom.in}
+                title={t.agents.zoom.in}
+              >
+                <ZoomIn className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="pointer-events-auto flex w-[170px] flex-col gap-2 rounded-[28px] border border-white/10 bg-slate-950/82 p-3 shadow-[0_20px_70px_-30px_rgba(0,0,0,0.9)] backdrop-blur-2xl">
+              <SidebarActionButton icon={Plus} label={t.agents.sidebar.createAgent} onClick={openCreateAgent} />
+              <SidebarActionButton
+                icon={UsersRound}
+                label={t.agents.sidebar.roles}
+                active={sidebarPanel === 'roles'}
+                onClick={() => setSidebarPanel((current) => (current === 'roles' ? null : 'roles'))}
+              />
+              <SidebarActionButton
+                icon={Database}
+                label={t.agents.sidebar.memory}
+                active={sidebarPanel === 'memory'}
+                onClick={() => setSidebarPanel((current) => (current === 'memory' ? null : 'memory'))}
+              />
+              <SidebarActionButton
+                icon={BookOpen}
+                label={t.agents.sidebar.knowledge}
+                active={sidebarPanel === 'knowledge'}
+                onClick={() => setSidebarPanel((current) => (current === 'knowledge' ? null : 'knowledge'))}
+              />
+            </div>
+
+            <AnimatePresence>
+              {sidebarPanel ? (
+                <SidebarPanel
+                  key={sidebarPanel}
+                  panel={sidebarPanel}
+                  t={t}
+                  agents={agents}
+                  rolesPanelTab={rolesPanelTab}
+                  onRolesTabChange={setRolesPanelTab}
+                  account={account}
+                  session={session}
+                  onClose={() => setSidebarPanel(null)}
+                  onLogin={() => signIn('google')}
+                  onOpenAgentEdit={(agent, tab) => openEditAgent(agent, tab)}
+                  onSheetSettingChange={updateAccountSheetSetting}
+                  onConnectSheets={requestGoogleSheetsAccess}
+                />
+              ) : null}
+            </AnimatePresence>
+          </div>
+
           {createAgentWindow.open ? (
             <Window
               id="create-agent"
-              title={t.agents.create.title}
+              title={createAgentMode === 'edit' ? t.agents.create.editTitle : t.agents.create.title}
               icon={Plus}
               accent="violet"
               position={createAgentWindow.position}
@@ -1103,10 +1414,12 @@ export default function Desktop() {
               <AccountWindowContent
                 session={session}
                 account={account}
+                labels={t.account}
                 onLogin={() => signIn('google')}
                 onLogout={() => signOut({ callbackUrl: '/' })}
                 onUpdateApiKey={updateAccountApiKey}
                 onUpdateSetting={updateAccountSetting}
+                onUpdateSheetSetting={updateAccountSheetSetting}
               />
             </Window>
           ) : null}
@@ -1155,11 +1468,22 @@ export default function Desktop() {
                   lang={lang}
                   messages={conversationsByAgentId[agent.id] ?? []}
                   draft={draftsByAgent[agent.id] ?? ''}
+                  isSending={sendingAgentId === agent.id}
                   onDraftChange={(value) => {
                     setDraftsByAgent((current) => ({ ...current, [agent.id]: value }));
                   }}
                   onSubmit={(event) => handleChatSubmit(event, agent.id)}
                   placeholder={t.agents.chatPlaceholder.replace('{agent}', agent.name)}
+                  onOpenMenuAction={(action) => {
+                    if (action === 'edit') openEditAgent(agent, 'profile');
+                    if (action === 'ai') openEditAgent(agent, 'ai');
+                    if (action === 'model') openEditAgent(agent, 'ai');
+                    if (action === 'prompt') openEditAgent(agent, 'ai');
+                    if (action === 'knowledge') openEditAgent(agent, 'ai');
+                    if (action === 'export') exportConversation(agent);
+                    if (action === 'delete') setDeleteConfirmAgentId(agent.id);
+                  }}
+                  menuLabels={t.agents.chatMenu}
                 />
               </Window>
             );
@@ -1227,7 +1551,7 @@ export default function Desktop() {
               type="button"
               onClick={() => {
                 const target = agentsById.get(contextMenu.agentId);
-                if (target) openEditAgent(target);
+                if (target) openRename(target, 'name');
                 setContextMenu(null);
               }}
               className="flex w-full items-center rounded-xl px-3 py-2 text-left text-[13px] text-white/82 hover:bg-white/[0.06]"
@@ -1271,6 +1595,21 @@ export default function Desktop() {
           </div>
         </div>
       ) : null}
+
+      <AnimatePresence>
+        {toast ? (
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 12 }}
+            className="fixed bottom-28 left-1/2 z-[70] w-full max-w-[540px] -translate-x-1/2 px-4"
+          >
+            <div className="rounded-full border border-white/10 bg-slate-950/90 px-4 py-3 text-center text-[13px] text-white/82 shadow-[0_18px_60px_-24px_rgba(0,0,0,0.85)] backdrop-blur-xl">
+              {toast}
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </div>
   );
 }
@@ -1767,6 +2106,198 @@ function CreateAgentAvatar({ lang, onClick }) {
   );
 }
 
+function SidebarActionButton({ icon: Icon, label, active = false, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex w-full items-center gap-3 rounded-2xl border px-3 py-3 text-left text-[13px] transition ${
+        active
+          ? 'border-cyan-300/25 bg-cyan-400/[0.12] text-white'
+          : 'border-white/10 bg-white/[0.04] text-white/74 hover:bg-white/[0.08]'
+      }`}
+    >
+      <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-black/20">
+        <Icon className="h-4 w-4" />
+      </span>
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function SidebarPanel({
+  panel,
+  t,
+  agents,
+  rolesPanelTab,
+  onRolesTabChange,
+  account,
+  session,
+  onClose,
+  onLogin,
+  onOpenAgentEdit,
+  onSheetSettingChange,
+  onConnectSheets,
+}) {
+  const panelTitle =
+    panel === 'roles'
+      ? t.agents.sidebar.roles
+      : panel === 'memory'
+        ? t.agents.sidebar.memory
+        : t.agents.sidebar.knowledge;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: 14 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: 12 }}
+      className="w-[340px] rounded-[28px] border border-white/10 bg-slate-950/92 p-4 shadow-[0_22px_90px_-36px_rgba(0,0,0,0.92)] backdrop-blur-2xl"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[11px] uppercase tracking-[0.18em] text-cyan-300/85">{panelTitle}</p>
+          <p className="mt-1 text-[13px] text-white/52">
+            {panel === 'roles'
+              ? 'Organiza el comportamiento base de los agentes.'
+              : panel === 'memory'
+                ? 'Configura Google Sheets para guardar memoria y creditos.'
+                : 'Gestiona los archivos locales de conocimiento por agente.'}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-[12px] text-white/60"
+        >
+          Cerrar
+        </button>
+      </div>
+
+      {panel === 'roles' ? (
+        <div className="mt-4">
+          <div className="flex flex-wrap gap-2">
+            {[
+              { key: 'roles', label: t.agents.sidebar.roles },
+              { key: 'create', label: t.agents.sidebar.createRole },
+              { key: 'mine', label: t.agents.sidebar.myRoles },
+              { key: 'explore', label: t.agents.sidebar.explore },
+            ].map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => onRolesTabChange(item.key)}
+                className={`rounded-full px-3 py-1.5 text-[12px] ${
+                  rolesPanelTab === item.key
+                    ? 'bg-white/[0.12] text-white'
+                    : 'border border-white/10 bg-white/[0.04] text-white/60'
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="mt-4 rounded-[24px] border border-white/10 bg-white/[0.04] p-4">
+            {rolesPanelTab === 'roles' || rolesPanelTab === 'mine' ? (
+              <div className="space-y-3">
+                {ROLE_OPTIONS.map((roleOption) => (
+                  <div
+                    key={roleOption.value}
+                    className="rounded-2xl border border-white/8 bg-black/15 px-4 py-3 text-[13px] text-white/76"
+                  >
+                    <p className="font-medium text-white">{roleOption.label}</p>
+                    <p className="mt-1 text-[12px] text-white/48">
+                      {agents.filter((agent) => agent.roleType === roleOption.value).length} agentes usando este rol
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : rolesPanelTab === 'create' ? (
+              <p className="text-[13px] leading-6 text-white/64">
+                Crear roles personalizados llegara despues. De momento puedes trabajar con Atencion al cliente y Asistente.
+              </p>
+            ) : (
+              <p className="text-[13px] leading-6 text-white/64">
+                Explorar roles queda preparado para una futura biblioteca compartida.
+              </p>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {panel === 'memory' ? (
+        <div className="mt-4 space-y-4">
+          <label className="block">
+            <span className="mb-2 block text-[13px] text-white/78">{t.account.sheetId}</span>
+            <input
+              value={account.settings.sheets.sheetId}
+              onChange={(event) => onSheetSettingChange('sheetId', event.target.value)}
+              placeholder="1AbC..."
+              className="w-full rounded-2xl border border-white/10 bg-black/15 px-4 py-3 text-[13px] text-white placeholder:text-white/35 focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-[13px] text-white/78">{t.account.sheetTab}</span>
+            <input
+              value={account.settings.sheets.sheetTab}
+              onChange={(event) => onSheetSettingChange('sheetTab', event.target.value)}
+              placeholder="Historial"
+              className="w-full rounded-2xl border border-white/10 bg-black/15 px-4 py-3 text-[13px] text-white placeholder:text-white/35 focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-[13px] text-white/78">{t.account.connectionMethod}</span>
+            <input
+              value={account.settings.sheets.connectionMethod}
+              readOnly
+              className="w-full rounded-2xl border border-white/10 bg-black/15 px-4 py-3 text-[13px] text-white/60 focus:outline-none"
+            />
+          </label>
+          <div className="rounded-[24px] border border-cyan-300/14 bg-cyan-400/[0.07] px-4 py-4 text-[13px] text-white/82">
+            {session?.user?.hasSheetsAccess
+              ? 'Permisos de Google Sheets concedidos. Los mensajes pueden guardarse en memoria.'
+              : 'Aun faltan permisos de Google Sheets. Te los pediremos en el primer guardado o puedes conectarlos ya.'}
+          </div>
+          <button
+            type="button"
+            onClick={session?.user ? onConnectSheets : onLogin}
+            className="w-full rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 px-4 py-3 text-[13px] font-medium text-slate-950"
+          >
+            {session?.user ? 'Conectar Google Sheets' : 'Iniciar sesion con Google'}
+          </button>
+        </div>
+      ) : null}
+
+      {panel === 'knowledge' ? (
+        <div className="mt-4 space-y-3">
+          {agents.map((agent) => (
+            <div
+              key={agent.id}
+              className="rounded-[24px] border border-white/10 bg-white/[0.04] px-4 py-4"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-[14px] font-medium text-white">{agent.name}</p>
+                  <p className="mt-1 text-[12px] text-white/52">
+                    {agent.knowledgeFileName || 'Sin base de conocimiento local'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onOpenAgentEdit(agent, 'ai')}
+                  className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-2 text-[12px] text-white/74"
+                >
+                  Editar
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </motion.div>
+  );
+}
+
 function CreateAgentForm({
   lang,
   t,
@@ -2036,7 +2567,18 @@ function HeroComposer({ value, onChange, onSubmit, placeholder }) {
   );
 }
 
-function ChatWindowContent({ agent, lang, messages, draft, onDraftChange, onSubmit, placeholder }) {
+function ChatWindowContent({
+  agent,
+  lang,
+  messages,
+  draft,
+  onDraftChange,
+  onSubmit,
+  placeholder,
+  onOpenMenuAction,
+  menuLabels,
+  isSending = false,
+}) {
   const palette = getColorOption(agent.colorKey);
   const attachmentLabel = 'Adjuntar archivo';
   const voiceLabel = 'Hablar por micrófono';
@@ -2052,11 +2594,57 @@ function ChatWindowContent({ agent, lang, messages, draft, onDraftChange, onSubm
               <p className="text-[13px] text-white/62">{agent.role}</p>
             </div>
           </div>
-          <div className="hidden text-right sm:block">
-            <p className="text-[11px] uppercase tracking-[0.2em] text-cyan-300/85">AI Agent</p>
-            <p className="text-[12px] text-white/45">
-              Chat placeholder del agente
-            </p>
+          <div className="flex items-center gap-3">
+            <div className="hidden text-right sm:block">
+              <p className="text-[11px] uppercase tracking-[0.2em] text-cyan-300/85">AI Agent</p>
+              <p className="text-[12px] text-white/45">{isSending ? 'Respondiendo...' : 'Chat listo'}</p>
+            </div>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setMenuOpen((current) => !current)}
+                className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-white/68 transition hover:bg-white/[0.08] hover:text-white"
+                aria-label="Abrir menu del agente"
+              >
+                <Ellipsis className="h-4 w-4" />
+              </button>
+              <AnimatePresence>
+                {menuOpen ? (
+                  <motion.div
+                    initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 6, scale: 0.98 }}
+                    className="absolute right-0 top-12 z-30 min-w-[220px] rounded-[22px] border border-white/10 bg-slate-950/96 p-2 shadow-[0_18px_60px_-24px_rgba(0,0,0,0.78)] backdrop-blur-xl"
+                  >
+                    {[
+                      ['edit', menuLabels?.editAgent],
+                      ['ai', menuLabels?.aiConfig],
+                      ['model', menuLabels?.model],
+                      ['prompt', menuLabels?.prompt],
+                      ['knowledge', menuLabels?.knowledge],
+                      ['export', menuLabels?.export],
+                      ['delete', menuLabels?.delete],
+                    ].map(([action, label]) => (
+                      <button
+                        key={action}
+                        type="button"
+                        onClick={() => {
+                          setMenuOpen(false);
+                          onOpenMenuAction?.(action);
+                        }}
+                        className={`flex w-full items-center rounded-xl px-3 py-2 text-left text-[13px] ${
+                          action === 'delete'
+                            ? 'text-rose-200 hover:bg-rose-400/[0.08]'
+                            : 'text-white/82 hover:bg-white/[0.06]'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
+            </div>
           </div>
         </div>
       </div>
@@ -2112,7 +2700,8 @@ function ChatWindowContent({ agent, lang, messages, draft, onDraftChange, onSubm
           <button
             type="submit"
             aria-label="Enviar mensaje"
-            className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-gradient-to-br ${palette.gradient} text-slate-950 transition hover:scale-[1.03]`}
+            disabled={isSending}
+            className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-gradient-to-br ${palette.gradient} text-slate-950 transition hover:scale-[1.03] disabled:cursor-not-allowed disabled:opacity-70`}
           >
             <ArrowUp className="h-4.5 w-4.5" />
           </button>
